@@ -83,7 +83,7 @@ class CipherSuite(object):
             return self._name
 
     def __repr__(self):
-        return 'CipherSuite(%s)' % self.name
+        return 'CipherSuite(0x%04x, %s)' % (self.code, self.name)
 
     MAC_SIZES = {
         'MD5': 16,
@@ -130,6 +130,10 @@ class CipherSuite(object):
     @property
     def anonymous(self):
         return self.auth.startswith('anon')
+
+
+def get_unknown_ciphersuite(code):
+    return CipherSuite(code, '', '', '', '', '', name='Unknown')
 
 
 # master list of CipherSuite Objects
@@ -327,6 +331,13 @@ CIPHERSUITES = [
     CipherSuite(0x00c3, 'DHE ', 'DSS     ', 'CAMELLIA_256', 'CBC', 'SHA256'),
     CipherSuite(0x00c4, 'DHE ', 'RSA     ', 'CAMELLIA_256', 'CBC', 'SHA256'),
     CipherSuite(0x00c5, 'DH  ', 'anon    ', 'CAMELLIA_256', 'CBC', 'SHA256'),
+
+    # RFC8446 TLS 1.3
+    CipherSuite(0x1301, '    ', '        ', 'AES_128 ', 'GCM     ', 'SHA256', name='TLS_AES_128_GCM_SHA256'),
+    CipherSuite(0x1302, '    ', '        ', 'AES_256 ', 'GCM     ', 'SHA384', name='TLS_AES_256_GCM_SHA384'),
+    CipherSuite(0x1303, '    ', '        ', 'CHACHA20', 'POLY1305', 'SHA256', name='TLS_CHACHA20_POLY1305_SHA256'),
+    CipherSuite(0x1304, '    ', '        ', 'AES_128 ', 'CCM     ', 'SHA256', name='TLS_AES_128_CCM_SHA256'),
+    CipherSuite(0x1305, '    ', '        ', 'AES_128 ', 'CCM_8   ', 'SHA256', name='TLS_AES_128_CCM_8_SHA256'),
 
     # RFC4492
     CipherSuite(0xc001, 'ECDH ', 'ECDSA  ', 'NULL    ', '    ', 'SHA'),
@@ -550,6 +561,24 @@ CIPHERSUITES = [
     CipherSuite(0xccad, 'DHE  ', 'PSK    ', 'CHACHA20', 'POLY1305', 'SHA256'),
     CipherSuite(0xccae, 'RSA  ', 'PSK    ', 'CHACHA20', 'POLY1305', 'SHA256'),
 
+    # RFC8701  // GREASE (Generate Random Extensions And Sustain Extensibility)
+    CipherSuite(0x0a0a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0x1a1a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0x2a2a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0x3a3a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0x4a4a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0x5a5a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0x6a6a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0x7a7a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0x8a8a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0x9a9a, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0xaaaa, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0xbaba, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0xcaca, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0xdada, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0xeaea, '', '', '', '', '', 'GREASE'),
+    CipherSuite(0xfafa, '', '', '', '', '', 'GREASE'),
+
     # Unassigned: 0xccaf-0xfefd
     # Reserved: 0xfefe-0xffff
 
@@ -676,6 +705,7 @@ class TestCipherSuites(object):
         assert (BY_CODE[0x00ab] == BY_NAME('TLS_DHE_PSK_WITH_AES_256_GCM_SHA384'))
         assert (BY_CODE[0x00b0] == BY_NAME('TLS_PSK_WITH_NULL_SHA256'))
         assert (BY_CODE[0x00bb] == BY_NAME('TLS_DH_DSS_WITH_CAMELLIA_128_CBC_SHA256'))
+        assert (BY_CODE[0x1303] == BY_NAME('TLS_CHACHA20_POLY1305_SHA256'))
         assert (BY_CODE[0xc008] == BY_NAME('TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA'))
         assert (BY_CODE[0xc016] == BY_NAME('TLS_ECDH_anon_WITH_RC4_128_SHA'))
         assert (BY_CODE[0xc01d] == BY_NAME('TLS_SRP_SHA_WITH_AES_128_CBC_SHA'))
@@ -695,7 +725,9 @@ class TestCipherSuites(object):
 
     def test_repr(self):
         cs = CipherSuite(0x0009, 'RSA', '         ', 'DES     ', 'CBC ', 'SHA')
-        assert repr(cs) == "CipherSuite(TLS_RSA_WITH_DES_CBC_SHA)"
+        assert repr(cs) == "CipherSuite(0x0009, TLS_RSA_WITH_DES_CBC_SHA)"
 
         assert cs.mac_size == 20
         assert cs.block_size == 8
+
+        repr(BY_CODE[0x6a6a]) == "CipherSuite(0x6a6a, GREASE)"

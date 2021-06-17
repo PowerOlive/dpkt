@@ -16,9 +16,33 @@ TH_ACK = 0x10  # acknowledgment number set
 TH_URG = 0x20  # urgent pointer set
 TH_ECE = 0x40  # ECN echo, RFC 3168
 TH_CWR = 0x80  # congestion window reduced
+TH_NS = 0x100  # nonce sum, RFC 3540
 
 TCP_PORT_MAX = 65535  # maximum port
 TCP_WIN_MAX = 65535  # maximum (unscaled) window
+
+
+def tcp_flags_to_str(val):
+    ff = []
+    if val & TH_FIN:
+        ff.append('FIN')
+    if val & TH_SYN:
+        ff.append('SYN')
+    if val & TH_RST:
+        ff.append('RST')
+    if val & TH_PUSH:
+        ff.append('PUSH')
+    if val & TH_ACK:
+        ff.append('ACK')
+    if val & TH_URG:
+        ff.append('URG')
+    if val & TH_ECE:
+        ff.append('ECE')
+    if val & TH_CWR:
+        ff.append('CWR')
+    if val & TH_NS:
+        ff.append('NS')
+    return ','.join(ff)
 
 
 class TCP(dpkt.Packet):
@@ -27,8 +51,16 @@ class TCP(dpkt.Packet):
     TODO: Longer class information....
 
     Attributes:
-        __hdr__: Header fields of TCP.
-        TODO.
+        sport - source port
+        dport - destination port
+        seq   - sequence number
+        ack   - acknowledgement number
+        off   - data offset in 32-bit words
+        flags - TCP flags
+        win   - TCP window size
+        sum   - checksum
+        urp   - urgent pointer
+        opts  - TCP options buffer; call parse_opts() to parse
     """
 
     __hdr__ = (
@@ -36,21 +68,47 @@ class TCP(dpkt.Packet):
         ('dport', 'H', 0),
         ('seq', 'I', 0xdeadbeef),
         ('ack', 'I', 0),
-        ('_off', 'B', ((5 << 4) | 0)),
-        ('flags', 'B', TH_SYN),
+        ('_off_flags', 'H', ((5 << 12) | TH_SYN)),
         ('win', 'H', TCP_WIN_MAX),
         ('sum', 'H', 0),
         ('urp', 'H', 0)
     )
+
+    __pprint_funcs__ = {
+        'flags': tcp_flags_to_str,
+        'sum': hex,  # display checksum in hex
+    }
+
     opts = b''
+
+    # getters and setters to process _off_flags
+
+    #   0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15
+    # +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+    # |               |           | N | C | E | U | A | P | R | S | F |
+    # | Header Length | Reserved  | S | W | C | R | C | S | S | Y | I |
+    # |               |           |   | R | E | G | K | H | T | N | N |
+    # +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 
     @property
     def off(self):
-        return self._off >> 4
+        # 2-byte word = 16 bits; shift right 12 bits to get 4 hi bits
+        return self._off_flags >> 12
 
     @off.setter
     def off(self, off):
-        self._off = (off << 4) | (self._off & 0xf)
+        # 2-byte word with 4 hi bits zeroed = 0b0000111111111111 = 0x0fff
+        self._off_flags = (off << 12) | (self._off_flags & 0xfff)
+
+    @property
+    def flags(self):
+        # 9 lo bits 0b111111111 = 0x1ff
+        return self._off_flags & 0x1ff
+
+    @flags.setter
+    def flags(self, flags):
+        # 2-byte word with 9 lo bits zeroed = 0b1111111000000000 = 0xfe00
+        self._off_flags = (self._off_flags & 0xfe00) | flags
 
     def __len__(self):
         return self.__hdr_len__ + len(self.opts) + len(self.data)
@@ -60,7 +118,7 @@ class TCP(dpkt.Packet):
 
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
-        ol = ((self._off >> 4) << 2) - self.__hdr_len__
+        ol = ((self._off_flags >> 12) << 2) - self.__hdr_len__
         if ol < 0:
             raise dpkt.UnpackError('invalid header length')
         self.opts = buf[self.__hdr_len__:self.__hdr_len__ + ol]
@@ -158,3 +216,42 @@ def test_offset():
     # test setting header offset
     tcpheader.off = 8
     assert bytes(tcpheader) == b'\x01\xbb\xc0\xd7\xb6\x56\xa8\xb9\xd1\xac\xaa\xb1\x80\x18\x40\x00\x56\xf8\x00\x00'
+
+
+def test_tcp_flags_to_str():
+    assert tcp_flags_to_str(0x18) == 'PUSH,ACK'
+    assert tcp_flags_to_str(0x12) == 'SYN,ACK'
+    # for code coverage
+    assert tcp_flags_to_str(0x1ff) == 'FIN,SYN,RST,PUSH,ACK,URG,ECE,CWR,NS'
+
+
+def test_tcp_unpack():
+    data = (b'\x00\x50\x0d\x2c\x11\x4c\x61\x8b\x38\xaf\xfe\x14\x70\x12\x16\xd0'
+            b'\x5b\xdc\x00\x00\x02\x04\x05\x64\x01\x01\x04\x02')
+    tcp = TCP(data)
+    assert tcp.flags == (TH_SYN | TH_ACK)
+    assert tcp.off == 7
+    assert tcp.win == 5840
+    assert tcp.dport == 3372
+    assert tcp.seq == 290218379
+    assert tcp.ack == 951057940
+
+
+def test_tcp_pack():
+    tcp = TCP(
+        sport=3372,
+        dport=80,
+        seq=951057939,
+        ack=0,
+        off=7,
+        flags=TH_SYN,
+        win=8760,
+        sum=0xc30c,
+        urp=0,
+        opts=b'\x02\x04\x05\xb4\x01\x01\x04\x02'
+    )
+    assert bytes(tcp) == (
+        b'\x0d\x2c\x00\x50\x38\xaf\xfe\x13\x00\x00\x00\x00\x70\x02\x22\x38'
+        b'\xc3\x0c\x00\x00\x02\x04\x05\xb4\x01\x01\x04\x02')
+
+    # TODO: add checksum calculation

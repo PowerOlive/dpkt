@@ -7,7 +7,7 @@ __author__ = 'Various'
 __author_email__ = ''
 __license__ = 'BSD-3-Clause'
 __url__ = 'https://github.com/kbandla/dpkt'
-__version__ = '1.9.5'
+__version__ = '1.9.6'
 
 from .dpkt import *
 
@@ -62,6 +62,7 @@ from . import sccp
 from . import sctp
 from . import sip
 from . import sll
+from . import sll2
 from . import smb
 from . import ssl
 from . import stp

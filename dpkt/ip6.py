@@ -8,6 +8,7 @@ from . import dpkt
 from . import ip
 from . import tcp
 from .compat import compat_ord
+from .utils import inet_to_str
 import struct
 
 # The allowed extension headers and their classes (in order according to RFC).
@@ -34,6 +35,12 @@ class IP6(dpkt.Packet):
         ('src', '16s', b''),
         ('dst', '16s', b'')
     )
+
+    __pprint_funcs__ = {
+        'src': inet_to_str,
+        'dst': inet_to_str
+    }
+
     _protosw = ip.IP._protosw
 
     @property
@@ -63,6 +70,7 @@ class IP6(dpkt.Packet):
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
         self.extension_hdrs = {}
+
         # NOTE: self.extension_hdrs is not accurate, as it doesn't support duplicate header types.
         # According to RFC-1883 "Each extension header should occur at most once, except for the
         # Destination Options header which should occur at most twice".
@@ -90,6 +98,12 @@ class IP6(dpkt.Packet):
         if next_ext_hdr is not None:
             self.p = next_ext_hdr
 
+        # do not decode fragments after the first fragment
+        # https://github.com/kbandla/dpkt/issues/575
+        if self.nxt == 44 and ext.frag_off > 0:  # 44 = IP_PROTO_FRAGMENT
+            self.data = buf
+            return
+
         try:
             self.data = self._protosw[next_ext_hdr](buf)
             setattr(self, self.data.__class__.__name__.lower(), self.data)
@@ -103,6 +117,7 @@ class IP6(dpkt.Packet):
             # get the nxt header from the last one
             nxt = self.all_extension_headers[-1].nxt
             return nxt, b''.join(bytes(ext) for ext in self.all_extension_headers)
+
         # Output extension headers in order defined in RFC1883 (except dest opts)
         header_str = b""
         if hasattr(self, 'extension_hdrs'):
@@ -114,8 +129,10 @@ class IP6(dpkt.Packet):
 
     def __bytes__(self):
         self.p, hdr_str = self.headers_str()
-        if (self.p == 6 or self.p == 17 or self.p == 58) and not self.data.sum:
-            # XXX - set TCP, UDP, and ICMPv6 checksums
+
+        # set TCP, UDP, and ICMPv6 checksums
+        if ((self.p == 6 or self.p == 17 or self.p == 58) and
+           hasattr(self.data, 'sum') and not self.data.sum):
             p = bytes(self.data)
             s = struct.pack('>16s16sxBH', self.src, self.dst, self.p, len(p))
             s = dpkt.in_cksum_add(0, s)
@@ -123,6 +140,14 @@ class IP6(dpkt.Packet):
             self.data.sum = dpkt.in_cksum_done(s)
 
         return self.pack_hdr() + hdr_str + bytes(self.data)
+
+    def __len__(self):
+        baselen = self.__hdr_len__ + len(self.data)
+        if hasattr(self, 'all_extension_headers') and self.all_extension_headers:
+            return baselen + sum(len(hh) for hh in self.all_extension_headers)
+        elif hasattr(self, 'extension_hdrs') and self.extension_hdrs:
+            return baselen + sum(len(hh) for hh in self.extension_hdrs.values())
+        return baselen
 
     @classmethod
     def set_proto(cls, p, pktclass):
@@ -256,7 +281,7 @@ class IP6FragmentHeader(IP6ExtensionHeader):
 
     @m_flag.setter
     def m_flag(self, v):
-        self.frag_off_resv_m = (self.frag_off_resv_m & ~0xfffe) | v
+        self.frag_off_resv_m = (self.frag_off_resv_m & 0xfffe) | (v & 1)
 
 
 class IP6AHHeader(IP6ExtensionHeader):
@@ -340,13 +365,18 @@ def test_ip6_routing_header():
 
 
 def test_ip6_fragment_header():
-    s = b'\x06\xee\xff\xfb\x00\x00\xff\xff'
+    s = b'\x06\xee\xff\xf9\x00\x00\xff\xff'
     fh = IP6FragmentHeader(s)
     # s2 = str(fh) variable 's2' is not used
     assert fh.nxt == 6
     assert fh.id == 65535
     assert fh.frag_off == 8191
     assert fh.m_flag == 1
+
+    # test packing
+    fh.frag_off_resv_m = 0
+    fh.frag_off = 8191
+    fh.m_flag = 1
     assert bytes(fh) == s
 
     # IP6 with fragment header
@@ -404,6 +434,13 @@ def test_ip6_extension_headers():
     _ip.extension_hdrs[60] = IP6DstOptsHeader(do)
     assert len(_ip.extension_hdrs) == 5
 
+    # this is a legacy unit test predating the addition of .all_extension_headers
+    # this way of adding extension headers does not update .all_extension_headers
+    # so we need to kick .all_extension_headers to force the __len__() method pick up
+    # the updated legacy attribute and calculate the len correctly
+    del _ip.all_extension_headers
+    assert len(_ip) == len(p) + len(o) + len(fh) + len(ah) + len(do)
+
 
 def test_ip6_all_extension_headers():  # https://github.com/kbandla/dpkt/pull/403
     s = (b'\x60\x00\x00\x00\x00\x47\x3c\x40\xfe\xd0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01'
@@ -420,6 +457,7 @@ def test_ip6_all_extension_headers():  # https://github.com/kbandla/dpkt/pull/40
     assert isinstance(hdrs[3], IP6FragmentHeader)
     assert isinstance(hdrs[5], IP6DstOptsHeader)
     assert bytes(_ip) == s
+    assert len(_ip) == len(s)
 
 
 def test_ip6_gen_tcp_ack():
@@ -534,3 +572,28 @@ def test_proto_accessors():
     assert 'PROTO' not in IP6._protosw
     IP6.set_proto('PROTO', Proto)
     assert IP6.get_proto('PROTO') == Proto
+
+
+def test_ip6_fragment_no_decode():  # https://github.com/kbandla/dpkt/issues/575
+    from . import udp
+
+    # fragment 0
+    s = (b'\x60\x00'
+         b'\x00\x00\x00\x2c\x11\x3f\x20\x01\x06\x38\x05\x01\x8e\xfe\xcc\x4a'
+         b'\x48\x39\xfa\x79\x04\xdc\x20\x01\x05\x00\x00\x60\x00\x00\x00\x00'
+         b'\x00\x00\x00\x00\x00\x30\xde\xf2\x00\x35\x00\x2c\x61\x50\x4d\x8b'
+         b'\x01\x20\x00\x01\x00\x00\x00\x00\x00\x01\x03\x69\x73\x63\x03\x6f'
+         b'\x72\x67\x00\x00\xff\x00\x01\x00\x00\x29\x10\x00\x00\x00\x80\x00'
+         b'\x00\x00')
+    frag0 = IP6(s)
+    assert type(frag0.data) == udp.UDP
+
+    s = (b'\x60\x00\x00\x00\x01\x34\x2c\x35\x20\x01\x05\x00\x00\x60\x00\x00'
+         b'\x00\x00\x00\x00\x00\x00\x00\x30\x20\x01\x06\x38\x05\x01\x8e\xfe'
+         b'\xcc\x4a\x48\x39\xfa\x79\x04\xdc'
+         b'\x11\x72\x31\xb9\xc1\x0f\xcf\x7c\x61\x62\x63\x64\x65\x66\x67\x68')  # partial data
+    frag2 = IP6(s)
+    assert type(frag2.data) == bytes
+
+    # test packing
+    assert bytes(frag2) == s

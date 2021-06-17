@@ -1,7 +1,7 @@
 # $Id: dpkt.py 43 2007-08-02 22:42:59Z jon.oberheide $
 # -*- coding: utf-8 -*-
 """Simple packet creation and parsing."""
-from __future__ import absolute_import
+from __future__ import absolute_import, print_function
 
 import copy
 import struct
@@ -39,6 +39,12 @@ class _MetaPacket(type):
             t.__hdr_len__ = struct.calcsize(t.__hdr_fmt__)
             t.__hdr_defaults__ = dict(compat_izip(
                 t.__hdr_fields__, [x[2] for x in st]))
+
+        # optional map of functions for pretty printing
+        # {field_name: callable(field_value) -> str, ..}
+        # define as needed in the child protocol classes
+        #t.__pprint_funcs__ = {}  - disabled here to keep the base class lightweight
+
         return t
 
 
@@ -91,8 +97,9 @@ class Packet(_MetaPacket("Temp", (object,), {})):
                 raise UnpackError('invalid %s: %r' %
                                   (self.__class__.__name__, args[0]))
         else:
-            for k in self.__hdr_fields__:
-                setattr(self, k, copy.copy(self.__hdr_defaults__[k]))
+            if hasattr(self, '__hdr_fields__'):
+                for k in self.__hdr_fields__:
+                    setattr(self, k, copy.copy(self.__hdr_defaults__[k]))
 
             for k, v in iteritems(kwargs):
                 setattr(self, k, v)
@@ -103,14 +110,25 @@ class Packet(_MetaPacket("Temp", (object,), {})):
     def __len__(self):
         return self.__hdr_len__ + len(self.data)
 
+    # legacy
     def __iter__(self):
-        return iter(zip(self.__class__.__hdr_fields__, map(self.__getitem__, self.__class__.__hdr_fields__)))
+        return iter((fld, getattr(self, fld)) for fld in self.__class__.__hdr_fields__)
 
-    def __getitem__(self, k):
+    def __getitem__(self, kls):
+        """Return the 1st occurence of the underlying <kls> data layer, raise KeyError otherwise."""
+        dd = self.data
+        while isinstance(dd, Packet):
+            if dd.__class__ == kls:
+                return dd
+            dd = dd.data
+        raise KeyError(kls)
+
+    def __contains__(self, kls):
+        """Return True is the given <kls> data layer is present in the stack."""
         try:
-            return getattr(self, k)
-        except AttributeError:
-            raise KeyError
+            return bool(self.__getitem__(kls))
+        except KeyError:
+            return False
 
     def __repr__(self):
         # Collect and display protocol fields in order:
@@ -141,6 +159,53 @@ class Packet(_MetaPacket("Temp", (object,), {})):
         if self.data:
             l_.append('data=%r' % self.data)
         return '%s(%s)' % (self.__class__.__name__, ', '.join(l_))
+
+    def pprint(self, indent=1):
+        """Human friendly pretty-print."""
+        l_ = []
+
+        def add_field(fn, fv):
+            """name=value,  # pretty-print form (if available)"""
+            try:
+                l_.append('%s=%r,  # %s' % (fn, fv, self.__pprint_funcs__[fn](fv)))
+            except (AttributeError, KeyError):
+                l_.append('%s=%r,' % (fn, fv))
+
+        for field_name, _, _ in getattr(self, '__hdr__', []):
+            field_value = getattr(self, field_name)
+            if field_name[0] != '_':
+                add_field(field_name, field_value)
+            else:
+                # interpret _private fields as name of properties joined by underscores
+                for prop_name in field_name.split('_'):           # (2)
+                    if isinstance(getattr(self.__class__, prop_name, None), property):
+                        prop_value = getattr(self, prop_name)
+                        add_field(prop_name, prop_value)
+        # (3)
+        for attr_name, attr_value in iteritems(self.__dict__):
+            if (attr_name[0] != '_' and                   # exclude _private attributes
+               attr_name != self.data.__class__.__name__.lower()):  # exclude fields like ip.udp
+                if type(attr_value) == list and attr_value:  # expand non-empty lists to print one item per line
+                    l_.append('%s=[' % attr_name)
+                    for av1 in attr_value:
+                        l_.append('  ' + repr(av1) + ',')  # XXX - TODO: support pretty-print
+                    l_.append('],')
+                else:
+                    add_field(attr_name, attr_value)
+
+        print('%s(' % self.__class__.__name__)  # class name, opening brace
+        for ii in l_:
+            print(' ' * indent, '%s' % ii)
+
+        # (4)
+        if self.data:
+            if isinstance(self.data, Packet):  # recursively descend to lower layers
+                print(' ' * indent, 'data=', end='')
+                self.data.pprint(indent=indent + 2)
+            else:
+                print(' ' * indent, 'data=%r' % self.data)
+        print(' ' * (indent - 1), end='')
+        print(')  # %s' % self.__class__.__name__)  # closing brace  # class name
 
     def __str__(self):
         return str(self.__bytes__())
@@ -231,24 +296,44 @@ def test_utils():
     assert (c == 51150)
 
 
-def test_getitem():
-    """create a Packet subclass and access its properties"""
+# test Packet.__getitem__ and __contains__ methods
+def test_getitem_contains():
     import pytest
 
     class Foo(Packet):
-        __hdr__ = (
-            ('foo', 'I', 1),
-            ('bar', 'H', 2),
-        )
+        __hdr__ = (('foo', 'I', 0),)
 
-    foo = Foo(foo=2, bar=3)
-    assert foo.foo == 2
-    assert foo['foo'] == 2
-    assert foo.bar == 3
-    assert foo['bar'] == 3
+    class Bar(Packet):
+        __hdr__ = (('bar', 'I', 0),)
+
+    class Baz(Packet):
+        __hdr__ = (('baz', 'I', 0),)
+
+    class Zeb(Packet):
+        pass
+
+    ff = Foo(foo=1, data=Bar(bar=2, data=Baz(attr=Zeb())))
+
+    # __contains__
+    assert Bar in ff
+    assert Baz in ff
+    assert Baz in ff.data
+    assert Zeb not in ff
+    assert Zeb not in Baz()
+
+    # __getitem__
+    assert isinstance(ff[Bar], Bar)
+    assert isinstance(ff[Baz], Baz)
+
+    assert isinstance(ff[Bar][Baz], Baz)
+    with pytest.raises(KeyError):
+        ff[Baz][Bar]
 
     with pytest.raises(KeyError):
-        foo['grill']
+        ff[Zeb]
+
+    with pytest.raises(KeyError):
+        Bar()[Baz]
 
 
 def test_pack_hdr_overflow():
